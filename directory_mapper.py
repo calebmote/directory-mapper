@@ -1,9 +1,19 @@
 #!/usr/bin/env python3
 """
 Directory Mapper - Recursively maps directory structure and file contents
+
 Example commands:
 python directory_mapper.py C:\\path\\to\\directory --excel directory_map.xlsx
 python directory_mapper.py C:\\path\\to\\directory -o output.json -e output.xlsx
+
+# Skip files larger than 10MB
+python directory_mapper.py D:\ --max-size 10485760 -e D_drive_map.xlsx
+
+# Skip files larger than 100MB  
+python directory_mapper.py D:\ --max-size 104857600 -e D_drive_map.xlsx
+
+# Skip files larger than 1GB
+python directory_mapper.py D:\ --max-size 1073741824 -e directory-map-21-Mar-2026.xlsx
 """
 
 import os
@@ -15,6 +25,8 @@ import mimetypes
 import json
 from datetime import datetime
 import time
+import hashlib
+from exclude_list import EXCLUDE_RULES
 
 
 class DirectoryMapper:
@@ -24,6 +36,7 @@ class DirectoryMapper:
         self.include_content = include_content
         self.max_file_size = max_file_size
         self.exclude_patterns = exclude_patterns or ['.git', '__pycache__', '.vscode', 'node_modules']
+        self.external_excludes = self.load_external_excludes()
         self.directory_map = {}
         self.total_files = 0
         self.processed_files = 0
@@ -31,6 +44,21 @@ class DirectoryMapper:
         self.processed_directories = 0
         self.start_time = None
         
+    def load_external_excludes(self) -> List[str]:
+        """Load exclude patterns from EXCLUDE_RULES dictionary"""
+        excludes = []
+        try:
+            for category, rules in EXCLUDE_RULES.items():
+                patterns = rules.get('patterns', [])
+                excludes.extend(patterns)
+                print(f"Loaded {len(patterns)} patterns from {category}")
+            
+            print(f"Total external exclude patterns: {len(excludes)}")
+            return excludes
+        except Exception as e:
+            print(f"Warning: Could not load exclude rules: {e}")
+            return []
+    
     def count_items(self, current_path: Path = None) -> None:
         """Count total files and directories for progress tracking"""
         if current_path is None:
@@ -85,25 +113,30 @@ class DirectoryMapper:
         """Check if path should be excluded based on patterns"""
         path_str = str(path)
         
-        # Check if path contains any exclude pattern
+        # Check if path contains any exclude pattern from command line
         for pattern in self.exclude_patterns:
             if pattern in path_str:
                 return True
         
-        # Additional check for $RECYCLE.BIN, .venv, and .angular to catch subdirectories and files
-        if any(pattern in path_str for pattern in
-        [
-            # '.angular',
-            # '.htm',
-            'OEBPS',
-            '$RECYCLE.BIN',
-            '.tmp',
-            # '.venv',
-            '.xml'
-        ]):
-            return True
+        # Check if path contains any pattern from external exclude file
+        for pattern in self.external_excludes:
+            if pattern in path_str:
+                return True
             
         return False
+    
+    def calculate_file_hash(self, file_path: Path, algorithm: str = 'sha256') -> str:
+        """Calculate hash of file content for duplicate detection"""
+        try:
+            hash_func = getattr(hashlib, algorithm)()
+            with open(file_path, 'rb') as f:
+                # Read file in chunks to handle large files efficiently
+                for chunk in iter(lambda: f.read(8192), b""):
+                    hash_func.update(chunk)
+            return hash_func.hexdigest()
+        except Exception:
+            # Return empty string for files that can't be hashed (binary files, permission issues, etc.)
+            return ""
     
     def is_text_file(self, file_path: Path) -> bool:
         """Check if file is likely a text file"""
@@ -155,6 +188,7 @@ class DirectoryMapper:
             'name': current_path.name,
             'size': None,
             'content': None,
+            'hash': None,
             'children': {}
         }
         
@@ -164,6 +198,7 @@ class DirectoryMapper:
             
             if current_path.is_file() and self.include_content:
                 result['content'] = self.read_file_content(current_path)
+                result['hash'] = self.calculate_file_hash(current_path)
             
             elif current_path.is_dir():
                 for item in sorted(current_path.iterdir()):
@@ -259,6 +294,7 @@ class DirectoryMapper:
             'Full Path': item_path,
             'Size (bytes)': data.get('size', 0),
             'Modified': datetime.fromtimestamp(Path(self.root_path / data['path']).stat().st_mtime).strftime('%Y-%m-%d %H:%M:%S') if data['path'] != '.' else '',
+            'Hash': data.get('hash', ''),
             'Content Preview': ''
         }
         
@@ -324,7 +360,7 @@ def main():
     # Set default output file if not provided
     if args.output or not args.excel:
         output_file = args.output or "directory_map.json"
-        print(f"Saving JSON output...")
+        print(f"\nSaving JSON output...")
         mapper.save_to_file(directory_map, output_file)
         print(f"JSON map saved to: {output_file}")
     
